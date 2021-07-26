@@ -1,0 +1,129 @@
+parameters:
+- name: publish 
+  type: object
+  default: []
+- name: munitTimeout
+  type: number
+  default: 20000
+- name: vmImage
+  type: string
+  default: ubuntu-latest
+- name: vmName
+  type: string
+  default: self-hosted
+- name: sonarqubeProjectKey
+  type: string
+  default: Mobile_API_v1_$(Build.Repository.Name)
+- name: skipTests
+  type: boolean
+  default: false
+- name: skipSonarqubeAnalysis
+  type: boolean
+  default: false
+  
+stages: 
+  - stage: ci_pipeline
+    displayName: 'CI PIPELINE'
+    jobs: 
+      - job: ci_pipeline
+        displayName: "CI PIPELINE"
+        timeoutInMinutes: 30
+        pool:
+          vmImage: ${{ parameters.vmImage }}
+        steps: 
+          - task: CacheBeta@0
+            displayName: "Maven Repo Cache"
+            inputs: 
+              key: $(Build.Repository.Name)
+              path: $(MAVEN_CACHE_FOLDER)  
+          - task: DownloadSecureFile@1
+            displayName: "Download Secure Maven Settings File"
+            inputs: 
+              secureFile: settings.xml
+            name: settings
+          - task: Bash@3
+            displayName: "Set Maven Version"
+            inputs:
+              targetType: 'inline'
+              script: |
+                 version=`mvn help:evaluate -DBUILD_BUILDID=$(Build.BuildId) -Dexpression=project.version -DforceStdout -q`
+                 echo $version
+                 echo "##vso[task.setvariable variable=BUILD_VERSION;]$version"
+          - task: Maven@3
+            displayName: "Update Maven Version"
+            inputs: 
+              goals: "versions:set -DnewVersion=$(BUILD_VERSION) -s $(settings.secureFilePath) -DBUILD_BUILDID=0 -DprocessDependencies=false"
+              javaHomeOption: JDKVersion
+              jdkArchitectureOption: x64
+              jdkVersionOption: "1.8"
+              mavenOptions: "-Xmx512m"
+              mavenPomFile: pom.xml
+              publishJUnitResults: false
+          - task: Maven@3
+            displayName: "Build Code"
+            inputs:
+              goals: "clean compile -s $(settings.secureFilePath) $(MAVEN_OPTS)"
+              javaHomeOption: JDKVersion
+              jdkArchitectureOption: x64
+              jdkVersionOption: "1.8"
+              mavenOptions: "-Xmx512m"
+              mavenPomFile: pom.xml
+              publishJUnitResults: false
+              
+          - task: Maven@3
+            condition: and(succeeded(),and(not(${{ parameters.skipTests }}),not(contains(variables['build.sourceBranch'],'feature'))))
+            displayName: "Unit Test"
+            inputs: 
+              goals: "test -s $(settings.secureFilePath) $(MAVEN_OPTS)"
+              javaHomeOption: JDKVersion
+              jdkArchitectureOption: x64
+              jdkVersionOption: "1.8"
+              mavenOptions: '-Xmx2048m'
+              mavenPomFile: pom.xml
+              options: "-Dmunit.test.timeout=${{parameters.munitTimeout}} -Druntime.securePropKey=$(SECURE_PROP_SECRET)"
+              publishJUnitResults: true
+              testResultsFiles: "**/surefire-reports/TEST-*.xml"
+              
+          - task: SonarQubePrepare@4
+            displayName: "Prepare SonarQube Env"
+            condition: and(succeeded(),not(${{ parameters.skipSonarQubeAnalysis }}))
+            inputs: 
+              SonarQube: sonarqube
+              extraProperties: "sonar.projectKey=${{parameters.sonarqubeProjectKey}}"
+              scannerMode: Other
+          - task: Maven@3
+            condition: and(succeeded(),not(${{ parameters.skipSonarQubeAnalysis }}))
+            displayName: "SonarQube Analysis"
+            inputs: 
+              goals: "sonar:sonar $(MAVEN_OPTS)"
+              javaHomeOption: JDKVersion
+              jdkArchitectureOption: x64
+              jdkVersionOption: "1.11"
+              mavenOptions: "-Xmx512m"
+              mavenPomFile: pom.xml
+              options: "-Dsonar.login=$(SONARQUBE_TOKEN) -Dsonar.host.url=$(SONARQUBE_URL) -Dsonar.lang.patterns.xml=**/*.xsd,**/*.xsl -Dsonar.sources=src/"
+              publishJUnitResults: false
+                          
+          - task: SonarQubePublish@4
+            condition: and(succeeded(),not(${{ parameters.skipSonarQubeAnalysis }}))
+            displayName: "Publish SonarQube Results"
+            inputs: 
+              pollingTimeoutSec: "300"
+
+          - ${{ each branch in parameters.publish }}:
+              - task: Maven@3
+                condition: and(succeeded(),and(eq(variables['build.sourceBranch'],'${{ branch.branchName }}'),not(contains(variables['build.sourceBranch'],'feature'))))
+                displayName: 'Package and Publish Artifact'
+                inputs:
+                  mavenPomFile: 'pom.xml'
+                  mavenOptions: '-Xmx512m'
+                  javaHomeOption: 'JDKVersion'
+                  jdkVersionOption: '1.8'
+                  jdkArchitectureOption: 'x64'
+                  publishJUnitResults: false
+                  options: "-DskipTests "
+                  goals: 'package deploy -s $(settings.secureFilePath) -P ${{branch.env}} $(MAVEN_OPTS) -Dmaven.server=$(${{branch.env}}.maven.server) -Druntime.securePropKey=$(SECURE_PROP_SECRET)'
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: $(System.DefaultWorkingDirectory)
+              artifact: 'drop'

@@ -1,0 +1,7 @@
+variables: 
+  - group: sonarqube
+  - group: deployer-creds
+  - name: MAVEN_CACHE_FOLDER
+    value: $(HOME)/.m2/repository
+  - name: MAVEN_OPTS
+    value: "-Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)"
